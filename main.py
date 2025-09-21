@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import subprocess
@@ -62,6 +63,45 @@ class RequestWorker(QtCore.QObject):
             self.finished.emit(data)
         except requests.RequestException as exc:
             self.error.emit(str(exc))
+
+
+class UploadWorker(QtCore.QObject):
+    """Envoie des fichiers vers le webhook n8n dans un thread séparé."""
+
+    finished = QtCore.Signal(object)
+    error = QtCore.Signal(str)
+
+    def __init__(self, url: str, files: list[Path], parent: QtCore.QObject | None = None) -> None:
+        super().__init__(parent)
+        self._url = url
+        self._files = files
+
+    @QtCore.Slot()
+    def run(self) -> None:
+        if not self._url:
+            self.error.emit("Aucun webhook configuré.")
+            return
+
+        try:
+            with contextlib.ExitStack() as stack:
+                multipart_files = []
+                for index, file_path in enumerate(self._files):
+                    file_obj = stack.enter_context(file_path.open("rb"))
+                    multipart_files.append((
+                        f"file{index}",
+                        (file_path.name, file_obj, "text/plain"),
+                    ))
+
+                response = requests.post(self._url, files=multipart_files, timeout=60)
+                response.raise_for_status()
+                try:
+                    data: Any = response.json()
+                except ValueError:
+                    data = response.text
+        except (OSError, requests.RequestException) as exc:
+            self.error.emit(str(exc))
+        else:
+            self.finished.emit(data)
 
 
 class ChatBubble(QtWidgets.QFrame):
@@ -299,18 +339,140 @@ class ParamsTab(QtWidgets.QWidget):
         os.execl(sys.executable, sys.executable, *sys.argv)
 
 
-class PlaceholderTab(QtWidgets.QWidget):
-    """Onglet placeholder pour les futures fonctionnalités."""
+class UploadTab(QtWidgets.QWidget):
+    """Onglet dédié à l'envoi de fichiers texte vers n8n."""
 
-    def __init__(self, parent: QtWidgets.QWidget | None = None) -> None:
+    def __init__(self, webhook_url: str, parent: QtWidgets.QWidget | None = None) -> None:
         super().__init__(parent)
+        self._webhook_url = webhook_url
+        self._selected_files: list[Path] = []
+        self._thread: QtCore.QThread | None = None
+        self._worker: UploadWorker | None = None
+
+        self._build_ui()
+
+    # ------------------------------------------------------------------
+    # Construction de l'interface
+    # ------------------------------------------------------------------
+    def _build_ui(self) -> None:
         layout = QtWidgets.QVBoxLayout(self)
         layout.setContentsMargins(16, 16, 16, 16)
-        label = QtWidgets.QLabel("Fonctionnalité à venir…")
-        label.setAlignment(QtCore.Qt.AlignCenter)
-        layout.addStretch(1)
-        layout.addWidget(label)
-        layout.addStretch(1)
+        layout.setSpacing(14)
+
+        buttons_layout = QtWidgets.QHBoxLayout()
+        buttons_layout.setSpacing(10)
+
+        self.select_button = QtWidgets.QPushButton("Sélectionner fichiers")
+        self.select_button.clicked.connect(self._select_files)
+
+        self.send_button = QtWidgets.QPushButton("Envoyer au webhook")
+        self.send_button.clicked.connect(self._send_files)
+        self.send_button.setEnabled(False)
+
+        buttons_layout.addWidget(self.select_button)
+        buttons_layout.addWidget(self.send_button)
+        buttons_layout.addStretch(1)
+
+        layout.addLayout(buttons_layout)
+
+        self.files_list = QtWidgets.QListWidget()
+        self.files_list.setSelectionMode(QtWidgets.QAbstractItemView.NoSelection)
+        self.files_list.setAlternatingRowColors(False)
+        self.files_list.setMinimumHeight(160)
+        layout.addWidget(self.files_list)
+
+        self.result_edit = QtWidgets.QTextEdit()
+        self.result_edit.setReadOnly(True)
+        self.result_edit.setPlaceholderText("Résultat du webhook…")
+        self.result_edit.setMinimumHeight(180)
+        layout.addWidget(self.result_edit)
+
+    # ------------------------------------------------------------------
+    # Configuration
+    # ------------------------------------------------------------------
+    def set_webhook_url(self, url: str) -> None:
+        self._webhook_url = url
+
+    # ------------------------------------------------------------------
+    # Gestion des fichiers
+    # ------------------------------------------------------------------
+    def _select_files(self) -> None:
+        paths, _ = QtWidgets.QFileDialog.getOpenFileNames(
+            self,
+            "Sélectionner des fichiers texte",
+            str(Path.home()),
+            "Fichiers texte (*.txt)",
+        )
+
+        if not paths:
+            return
+
+        unique_paths: dict[str, Path] = {}
+        for path_str in paths:
+            path = Path(path_str)
+            unique_paths[str(path)] = path
+
+        self._selected_files = list(unique_paths.values())
+
+        self.files_list.clear()
+        for file_path in self._selected_files:
+            self.files_list.addItem(str(file_path))
+
+        self.send_button.setEnabled(bool(self._selected_files))
+
+    # ------------------------------------------------------------------
+    # Envoi vers le webhook
+    # ------------------------------------------------------------------
+    def _send_files(self) -> None:
+        if not self._selected_files:
+            self._show_result("Veuillez sélectionner des fichiers .txt avant l'envoi.")
+            return
+
+        if self._thread and self._thread.isRunning():
+            return
+
+        self._show_result("Envoi en cours…")
+        self._toggle_inputs(False)
+
+        self._thread = QtCore.QThread(self)
+        self._worker = UploadWorker(self._webhook_url, self._selected_files.copy())
+        self._worker.moveToThread(self._thread)
+
+        self._thread.started.connect(self._worker.run)
+        self._worker.finished.connect(self._handle_response)
+        self._worker.error.connect(self._handle_error)
+        self._worker.finished.connect(self._cleanup_thread)
+        self._worker.error.connect(self._cleanup_thread)
+
+        self._thread.start()
+
+    def _cleanup_thread(self) -> None:
+        if self._thread:
+            self._thread.quit()
+            self._thread.wait()
+            self._thread.deleteLater()
+            self._thread = None
+        if self._worker:
+            self._worker.deleteLater()
+            self._worker = None
+        self._toggle_inputs(True)
+
+    def _handle_response(self, data: object) -> None:
+        if isinstance(data, (dict, list)):
+            pretty = json.dumps(data, ensure_ascii=False, indent=2)
+        else:
+            pretty = str(data)
+        self._show_result(pretty)
+
+    def _handle_error(self, message: str) -> None:
+        self._show_result(f"Erreur : {message}")
+
+    def _show_result(self, text: str) -> None:
+        self.result_edit.setPlainText(text)
+
+    def _toggle_inputs(self, enabled: bool) -> None:
+        self.select_button.setEnabled(enabled)
+        self.send_button.setEnabled(enabled and bool(self._selected_files))
 
 
 class MainWindow(QtWidgets.QMainWindow):
@@ -328,15 +490,17 @@ class MainWindow(QtWidgets.QMainWindow):
 
         self.params_tab = ParamsTab(self.config)
         self.params_tab.webhook_changed.connect(self._update_webhook)
-        self.chat_tab = ChatTab(self.config.get("webhook_url", ""))
-        self.placeholder_tab = PlaceholderTab()
+        webhook = self.config.get("webhook_url", "")
+        self.chat_tab = ChatTab(webhook)
+        self.upload_tab = UploadTab(webhook)
 
         self.tab_widget.addTab(self.params_tab, "Paramètres")
         self.tab_widget.addTab(self.chat_tab, "Chat")
-        self.tab_widget.addTab(self.placeholder_tab, "À venir")
+        self.tab_widget.addTab(self.upload_tab, "Upload")
 
     def _update_webhook(self, url: str) -> None:
         self.chat_tab.set_webhook_url(url)
+        self.upload_tab.set_webhook_url(url)
 
 
 def create_app() -> QtWidgets.QApplication:
