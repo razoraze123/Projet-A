@@ -1,454 +1,448 @@
-"""Application PySide6 pour dialoguer avec un agent n8n via un webhook."""
+"""Application de bureau PySide6 pour dialoguer avec un agent n8n via un webhook."""
 
 from __future__ import annotations
 
 import json
+import os
+import subprocess
+import sys
+from pathlib import Path
 from typing import Any
 
 import requests
-from PySide6 import QtCore, QtGui, QtWidgets
+from PySide6 import QtCore, QtWidgets
 
 
-DEFAULT_WEBHOOK_URL = "http://localhost:5678/webhook/seo-optimize"
+CONFIG_FILE = Path(__file__).parent / "config.json"
+DEFAULT_CONFIG: dict[str, Any] = {"webhook_url": ""}
+
+
+def load_config() -> dict[str, Any]:
+    """Charge la configuration depuis ``config.json``."""
+
+    if CONFIG_FILE.exists():
+        try:
+            with CONFIG_FILE.open("r", encoding="utf-8") as handle:
+                data = json.load(handle)
+            if isinstance(data, dict):
+                return {**DEFAULT_CONFIG, **data}
+        except (OSError, json.JSONDecodeError):
+            pass
+    return DEFAULT_CONFIG.copy()
+
+
+def save_config(config: dict[str, Any]) -> None:
+    """Sauvegarde la configuration dans ``config.json``."""
+
+    CONFIG_FILE.parent.mkdir(parents=True, exist_ok=True)
+    with CONFIG_FILE.open("w", encoding="utf-8") as handle:
+        json.dump(config, handle, ensure_ascii=False, indent=2)
 
 
 class RequestWorker(QtCore.QObject):
-    """Worker exécuté dans un QThread pour lancer l'appel HTTP."""
+    """Effectue la requête HTTP dans un thread séparé."""
 
     finished = QtCore.Signal(object)
     error = QtCore.Signal(str)
 
-    def __init__(self, url: str, payload: dict[str, Any], parent: QtCore.QObject | None = None) -> None:
+    def __init__(self, url: str, message: str, parent: QtCore.QObject | None = None) -> None:
         super().__init__(parent)
         self._url = url
-        self._payload = payload
+        self._message = message
 
     @QtCore.Slot()
     def run(self) -> None:
-        """Effectue la requête POST vers le webhook."""
-
         try:
-            response = requests.post(self._url, json=self._payload, timeout=15)
+            response = requests.post(self._url, json={"message": self._message}, timeout=20)
             response.raise_for_status()
             try:
                 data: Any = response.json()
             except ValueError:
                 data = response.text
             self.finished.emit(data)
-        except requests.RequestException as exc:  # pragma: no cover - dépend du réseau
+        except requests.RequestException as exc:
             self.error.emit(str(exc))
 
 
 class ChatBubble(QtWidgets.QFrame):
-    """Widget représentant une bulle de discussion."""
+    """Bulle de conversation avec style personnalisé."""
 
-    def __init__(
-        self, sender: str, message: str, role: str, parent: QtWidgets.QWidget | None = None
-    ) -> None:
+    def __init__(self, text: str, role: str, parent: QtWidgets.QWidget | None = None) -> None:
         super().__init__(parent)
-        self.setObjectName("chatBubble")
         self.setProperty("role", role)
+        self.setObjectName("chatBubble")
         self.setSizePolicy(QtWidgets.QSizePolicy.Maximum, QtWidgets.QSizePolicy.Minimum)
-        self.setMaximumWidth(720)
+        self.setMaximumWidth(480)
 
         layout = QtWidgets.QVBoxLayout(self)
-        layout.setContentsMargins(20, 14, 20, 14)
-        layout.setSpacing(8)
+        layout.setContentsMargins(14, 10, 14, 10)
+        layout.setSpacing(6)
 
-        sender_label = QtWidgets.QLabel(sender)
-        sender_label.setObjectName("senderLabel")
-        sender_label.setAlignment(QtCore.Qt.AlignLeft)
-
-        message_label = QtWidgets.QLabel(message)
-        message_label.setObjectName("messageLabel")
-        message_label.setAlignment(QtCore.Qt.AlignLeft)
-        message_label.setWordWrap(True)
-        message_label.setTextInteractionFlags(
-            QtCore.Qt.TextSelectableByMouse | QtCore.Qt.TextSelectableByKeyboard
-        )
-        message_label.setTextFormat(QtCore.Qt.TextFormat.PlainText)
-        message_label.setText(message)
-
-        layout.addWidget(sender_label)
-        layout.addWidget(message_label)
-
-        self._repolish()
-
-    def _repolish(self) -> None:
-        style = self.style()
-        style.unpolish(self)
-        style.polish(self)
+        label = QtWidgets.QLabel(text)
+        label.setObjectName("bubbleText")
+        label.setWordWrap(True)
+        label.setAlignment(QtCore.Qt.AlignLeft)
+        label.setTextInteractionFlags(QtCore.Qt.TextSelectableByMouse | QtCore.Qt.TextSelectableByKeyboard)
+        layout.addWidget(label)
 
 
-class ChatInput(QtWidgets.QPlainTextEdit):
-    """Zone de saisie qui envoie le message sur Entrée."""
+class ChatTab(QtWidgets.QWidget):
+    """Onglet de discussion avec l'agent n8n."""
 
-    submitted = QtCore.Signal()
-
-    def __init__(self, parent: QtWidgets.QWidget | None = None) -> None:
+    def __init__(self, webhook_url: str, parent: QtWidgets.QWidget | None = None) -> None:
         super().__init__(parent)
-        self.setPlaceholderText("Poser une question")
-        self.setMaximumHeight(140)
-        self.setMinimumHeight(64)
-        self.document().setDocumentMargin(8)
-
-    def sizeHint(self) -> QtCore.QSize:  # pragma: no cover - dépend de Qt
-        size = super().sizeHint()
-        size.setHeight(88)
-        return size
-
-    def keyPressEvent(self, event: QtGui.QKeyEvent) -> None:  # pragma: no cover - dépend de Qt
-        if event.key() in (QtCore.Qt.Key_Return, QtCore.Qt.Key_Enter) and not event.modifiers() & QtCore.Qt.ShiftModifier:
-            event.accept()
-            self.submitted.emit()
-        else:
-            super().keyPressEvent(event)
-
-
-class MainWindow(QtWidgets.QMainWindow):
-    """Fenêtre principale de l'application."""
-
-    def __init__(self) -> None:
-        super().__init__()
-        self.setWindowTitle("Assistant n8n")
-
-        self.settings = QtCore.QSettings("ProjetA", "WebhookChat")
-        self.webhook_url: str = self.settings.value("webhook_url", DEFAULT_WEBHOOK_URL, str)
-
-        self.request_thread: QtCore.QThread | None = None
-        self.request_worker: RequestWorker | None = None
+        self._webhook_url = webhook_url
+        self._thread: QtCore.QThread | None = None
+        self._worker: RequestWorker | None = None
 
         self._build_ui()
 
-    # ------------------------------------------------------------------
-    # Construction de l'interface
-    # ------------------------------------------------------------------
     def _build_ui(self) -> None:
-        central_widget = QtWidgets.QWidget()
-        central_layout = QtWidgets.QVBoxLayout(central_widget)
-        central_layout.setContentsMargins(0, 0, 0, 0)
-        central_layout.setSpacing(0)
+        main_layout = QtWidgets.QVBoxLayout(self)
+        main_layout.setContentsMargins(16, 16, 16, 16)
+        main_layout.setSpacing(12)
 
-        central_layout.addWidget(self._build_header())
-        central_layout.addWidget(self._build_chat_area(), stretch=1)
-        central_layout.addWidget(self._build_input_panel())
+        self.scroll_area = QtWidgets.QScrollArea()
+        self.scroll_area.setWidgetResizable(True)
+        self.scroll_area.setFrameShape(QtWidgets.QFrame.NoFrame)
 
-        self.setCentralWidget(central_widget)
-        self._apply_styles()
+        self.scroll_widget = QtWidgets.QWidget()
+        self.messages_layout = QtWidgets.QVBoxLayout(self.scroll_widget)
+        self.messages_layout.setAlignment(QtCore.Qt.AlignTop)
+        self.messages_layout.setSpacing(10)
 
-    def _build_header(self) -> QtWidgets.QWidget:
-        header = QtWidgets.QWidget()
-        header.setObjectName("chatHeader")
-        layout = QtWidgets.QHBoxLayout(header)
-        layout.setContentsMargins(24, 16, 24, 16)
-        layout.setSpacing(12)
+        self.scroll_area.setWidget(self.scroll_widget)
+        main_layout.addWidget(self.scroll_area)
 
-        title = QtWidgets.QLabel("ChatGPT")
-        title.setObjectName("chatTitle")
+        input_layout = QtWidgets.QHBoxLayout()
+        input_layout.setSpacing(10)
 
-        subtitle = QtWidgets.QLabel("Interagissez avec votre agent n8n")
-        subtitle.setObjectName("chatSubtitle")
-
-        title_layout = QtWidgets.QVBoxLayout()
-        title_layout.setContentsMargins(0, 0, 0, 0)
-        title_layout.setSpacing(4)
-        title_layout.addWidget(title)
-        title_layout.addWidget(subtitle)
-
-        layout.addLayout(title_layout)
-        layout.addStretch()
-
-        settings_button = QtWidgets.QToolButton()
-        settings_button.setObjectName("settingsButton")
-        settings_button.setText("Paramètres")
-        settings_button.clicked.connect(self.open_settings_dialog)
-        layout.addWidget(settings_button)
-
-        return header
-
-    def _build_chat_area(self) -> QtWidgets.QScrollArea:
-        self.chat_scroll = QtWidgets.QScrollArea()
-        self.chat_scroll.setObjectName("chatScroll")
-        self.chat_scroll.setWidgetResizable(True)
-        self.chat_scroll.setFrameShape(QtWidgets.QFrame.NoFrame)
-        self.chat_scroll.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarAlwaysOff)
-
-        self.chat_container = QtWidgets.QWidget()
-        self.chat_layout = QtWidgets.QVBoxLayout(self.chat_container)
-        self.chat_layout.setContentsMargins(48, 32, 48, 32)
-        self.chat_layout.setSpacing(18)
-        self.chat_layout.addStretch()
-
-        self.chat_scroll.setWidget(self.chat_container)
-        return self.chat_scroll
-
-    def _build_input_panel(self) -> QtWidgets.QWidget:
-        input_panel = QtWidgets.QWidget()
-        input_panel.setObjectName("chatInputPanel")
-        layout = QtWidgets.QHBoxLayout(input_panel)
-        layout.setContentsMargins(48, 24, 48, 36)
-        layout.setSpacing(16)
-
-        self.chat_input = ChatInput()
-        self.chat_input.submitted.connect(self.send_chat_message)
+        self.input_field = QtWidgets.QLineEdit()
+        self.input_field.setPlaceholderText("Écrire un message…")
+        self.input_field.returnPressed.connect(self.send_message)
 
         self.send_button = QtWidgets.QPushButton("Envoyer")
-        self.send_button.setObjectName("sendButton")
-        self.send_button.clicked.connect(self.send_chat_message)
+        self.send_button.clicked.connect(self.send_message)
 
-        layout.addWidget(self.chat_input, stretch=1)
-        layout.addWidget(self.send_button)
+        input_layout.addWidget(self.input_field, stretch=1)
+        input_layout.addWidget(self.send_button)
 
-        return input_panel
-
-    # ------------------------------------------------------------------
-    # Gestion des paramètres
-    # ------------------------------------------------------------------
-    @QtCore.Slot()
-    def open_settings_dialog(self) -> None:
-        dialog = QtWidgets.QDialog(self)
-        dialog.setWindowTitle("Paramètres")
-        dialog.setModal(True)
-
-        layout = QtWidgets.QVBoxLayout(dialog)
-        layout.setContentsMargins(24, 24, 24, 24)
-        layout.setSpacing(16)
-
-        description = QtWidgets.QLabel(
-            "Configurez l'URL du webhook utilisé pour communiquer avec l'agent n8n."
-        )
-        description.setWordWrap(True)
-
-        webhook_input = QtWidgets.QLineEdit(self.webhook_url)
-        webhook_input.setPlaceholderText("https://...")
-
-        button_box = QtWidgets.QDialogButtonBox(
-            QtWidgets.QDialogButtonBox.Save | QtWidgets.QDialogButtonBox.Cancel
-        )
-        button_box.accepted.connect(dialog.accept)
-        button_box.rejected.connect(dialog.reject)
-
-        layout.addWidget(description)
-        layout.addWidget(webhook_input)
-        layout.addWidget(button_box)
-
-        if dialog.exec() == QtWidgets.QDialog.Accepted:
-            self._save_webhook_url(webhook_input.text())
-
-    def _save_webhook_url(self, value: str) -> None:
-        self.webhook_url = value.strip() or DEFAULT_WEBHOOK_URL
-        self.settings.setValue("webhook_url", self.webhook_url)
-        QtWidgets.QMessageBox.information(
-            self, "Paramètres", "URL sauvegardée avec succès."
-        )
+        main_layout.addLayout(input_layout)
 
     # ------------------------------------------------------------------
-    # Gestion du chat
+    # Configuration
     # ------------------------------------------------------------------
-    def append_message(self, sender: str, message: str, role: str) -> None:
-        bubble = ChatBubble(sender, message, role)
+    def set_webhook_url(self, url: str) -> None:
+        self._webhook_url = url
+
+    # ------------------------------------------------------------------
+    # Interface
+    # ------------------------------------------------------------------
+    def _add_bubble(self, text: str, role: str) -> None:
+        bubble = ChatBubble(text, role)
         container = QtWidgets.QWidget()
         layout = QtWidgets.QHBoxLayout(container)
         layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(12)
+        layout.setSpacing(0)
 
-        layout.addStretch()
-        layout.addWidget(bubble, 0, QtCore.Qt.AlignHCenter)
-        layout.addStretch()
+        if role == "user":
+            layout.addStretch(1)
+            layout.addWidget(bubble, 0, QtCore.Qt.AlignRight)
+        elif role == "agent":
+            layout.addWidget(bubble, 0, QtCore.Qt.AlignLeft)
+            layout.addStretch(1)
+        else:  # error
+            layout.addStretch(1)
+            layout.addWidget(bubble, 0, QtCore.Qt.AlignHCenter)
+            layout.addStretch(1)
 
-        self.chat_layout.insertWidget(self.chat_layout.count() - 1, container)
-        QtCore.QTimer.singleShot(0, self._scroll_to_bottom)
+        self.messages_layout.addWidget(container)
+        QtCore.QTimer.singleShot(0, self._ensure_visible)
 
-    def _format_response(self, data: Any) -> str:
-        if isinstance(data, (dict, list)):
-            try:
-                return json.dumps(data, ensure_ascii=False, indent=2)
-            except (TypeError, ValueError):
-                return str(data)
-        return str(data)
-
-    @QtCore.Slot()
-    def send_chat_message(self) -> None:
-        message = self.chat_input.toPlainText().strip()
-        if not message:
-            return
-
-        self.append_message("Vous", message, "user")
-        self.chat_input.clear()
-        self._set_inputs_enabled(False)
-
-        payload = {"message": message}
-        self.request_thread = QtCore.QThread()
-        self.request_worker = RequestWorker(self.webhook_url, payload)
-        self.request_worker.moveToThread(self.request_thread)
-
-        self.request_thread.started.connect(self.request_worker.run)
-        self.request_worker.finished.connect(self.on_request_success)
-        self.request_worker.error.connect(self.on_request_error)
-        self.request_worker.finished.connect(self._cleanup_request_thread)
-        self.request_worker.error.connect(self._cleanup_request_thread)
-        self.request_thread.finished.connect(self.request_thread.deleteLater)
-
-        self.request_thread.start()
-
-    @QtCore.Slot(object)
-    def on_request_success(self, data: Any) -> None:
-        self.append_message("Agent", self._format_response(data), "agent")
-
-    @QtCore.Slot(str)
-    def on_request_error(self, message: str) -> None:
-        self.append_message("Erreur", f"Impossible de contacter le webhook : {message}", "error")
-
-    @QtCore.Slot()
-    def _cleanup_request_thread(self) -> None:
-        if self.request_thread is not None:
-            self.request_thread.quit()
-            self.request_thread.wait()
-            self.request_thread = None
-            if self.request_worker is not None:
-                self.request_worker.deleteLater()
-                self.request_worker = None
-        self._set_inputs_enabled(True)
-
-    def _set_inputs_enabled(self, enabled: bool) -> None:
-        self.chat_input.setEnabled(enabled)
-        self.send_button.setEnabled(enabled)
-        if enabled:
-            self.chat_input.setFocus()
-
-    def _scroll_to_bottom(self) -> None:
-        bar = self.chat_scroll.verticalScrollBar()
+    def _ensure_visible(self) -> None:
+        bar = self.scroll_area.verticalScrollBar()
         bar.setValue(bar.maximum())
 
-    def _apply_styles(self) -> None:
-        self.setStyleSheet(
-            """
-            QMainWindow {
-                background-color: #202123;
-            }
+    # ------------------------------------------------------------------
+    # Communication
+    # ------------------------------------------------------------------
+    def send_message(self) -> None:
+        message = self.input_field.text().strip()
+        if not message:
+            return
+        if not self._webhook_url:
+            self._add_bubble("Aucun webhook configuré.", "error")
+            return
 
-            QWidget {
-                color: #ECEFF4;
-                font-family: 'Segoe UI', 'Helvetica Neue', Arial, sans-serif;
-                font-size: 11pt;
-            }
+        self._add_bubble(message, "user")
+        self.input_field.clear()
+        self._toggle_inputs(False)
 
-            #chatHeader {
-                background-color: #282B30;
-                border-bottom: 1px solid #2F3238;
-            }
+        self._thread = QtCore.QThread(self)
+        self._worker = RequestWorker(self._webhook_url, message)
+        self._worker.moveToThread(self._thread)
 
-            #chatTitle {
-                font-size: 18pt;
-                font-weight: 600;
-                color: #FFFFFF;
-            }
+        self._thread.started.connect(self._worker.run)
+        self._worker.finished.connect(self._handle_response)
+        self._worker.error.connect(self._handle_error)
+        self._worker.finished.connect(self._cleanup_thread)
+        self._worker.error.connect(self._cleanup_thread)
 
-            #chatSubtitle {
-                font-size: 11pt;
-                color: rgba(236, 239, 244, 0.7);
-            }
+        self._thread.start()
 
-            #settingsButton {
-                padding: 8px 18px;
-                border-radius: 18px;
-                background-color: rgba(255, 255, 255, 0.08);
-                color: #FFFFFF;
-            }
+    def _cleanup_thread(self) -> None:
+        if self._thread:
+            self._thread.quit()
+            self._thread.wait()
+            self._thread.deleteLater()
+            self._thread = None
+        if self._worker:
+            self._worker.deleteLater()
+            self._worker = None
+        self._toggle_inputs(True)
 
-            #settingsButton:hover {
-                background-color: rgba(255, 255, 255, 0.14);
-            }
+    def _handle_response(self, data: object) -> None:
+        if isinstance(data, (dict, list)):
+            pretty = json.dumps(data, ensure_ascii=False, indent=2)
+        else:
+            pretty = str(data)
+        self._add_bubble(pretty, "agent")
 
-            #settingsButton:pressed {
-                background-color: rgba(255, 255, 255, 0.2);
-            }
+    def _handle_error(self, message: str) -> None:
+        self._add_bubble(f"Erreur : {message}", "error")
 
-            #chatScroll {
-                background-color: #343541;
-            }
+    def _toggle_inputs(self, enabled: bool) -> None:
+        self.input_field.setEnabled(enabled)
+        self.send_button.setEnabled(enabled)
 
-            #chatInputPanel {
-                background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
-                                            stop:0 #343541, stop:1 #202123);
-            }
 
-            ChatInput {
-                background-color: #40414F;
-                border-radius: 18px;
-                padding: 16px 18px;
-                color: #FFFFFF;
-                border: 1px solid rgba(255, 255, 255, 0.08);
-            }
+class ParamsTab(QtWidgets.QWidget):
+    """Onglet de gestion des paramètres et de la mise à jour."""
 
-            ChatInput:focus {
-                border: 1px solid rgba(134, 160, 246, 0.9);
-            }
+    webhook_changed = QtCore.Signal(str)
 
-            QPushButton#sendButton {
-                background-color: #10A37F;
-                color: #FFFFFF;
-                padding: 14px 28px;
-                border-radius: 22px;
-                font-weight: 600;
-            }
+    def __init__(self, config: dict[str, Any], parent: QtWidgets.QWidget | None = None) -> None:
+        super().__init__(parent)
+        self._config = config
 
-            QPushButton#sendButton:hover {
-                background-color: #17C190;
-            }
+        self._build_ui()
 
-            QPushButton#sendButton:pressed {
-                background-color: #0D8568;
-            }
+    def _build_ui(self) -> None:
+        layout = QtWidgets.QVBoxLayout(self)
+        layout.setContentsMargins(16, 16, 16, 16)
+        layout.setSpacing(16)
 
-            ChatBubble {
-                border-radius: 18px;
-                background-color: #444654;
-            }
+        form_layout = QtWidgets.QFormLayout()
+        form_layout.setLabelAlignment(QtCore.Qt.AlignLeft)
+        form_layout.setFormAlignment(QtCore.Qt.AlignTop)
+        form_layout.setHorizontalSpacing(12)
+        form_layout.setVerticalSpacing(10)
 
-            ChatBubble[role="user"] {
-                background-color: #343541;
-            }
+        self.webhook_input = QtWidgets.QLineEdit(self._config.get("webhook_url", ""))
+        form_layout.addRow("URL du webhook", self.webhook_input)
 
-            ChatBubble[role="agent"] {
-                background-color: #444654;
-            }
+        layout.addLayout(form_layout)
 
-            ChatBubble[role="error"] {
-                background-color: #8B3A3A;
-            }
+        buttons_layout = QtWidgets.QHBoxLayout()
+        buttons_layout.setSpacing(12)
 
-            ChatBubble > QLabel#senderLabel {
-                font-size: 10pt;
-                color: rgba(255, 255, 255, 0.65);
-                text-transform: uppercase;
-                letter-spacing: 1px;
-            }
+        self.save_button = QtWidgets.QPushButton("Sauvegarder")
+        self.save_button.clicked.connect(self._save_webhook)
 
-            ChatBubble[role="user"] > QLabel#senderLabel,
-            ChatBubble[role="agent"] > QLabel#senderLabel,
-            ChatBubble[role="error"] > QLabel#senderLabel {
-                color: rgba(255, 255, 255, 0.72);
-            }
+        self.update_button = QtWidgets.QPushButton("Mettre à jour l’app")
+        self.update_button.clicked.connect(self._update_application)
 
-            ChatBubble > QLabel#messageLabel {
-                font-size: 12pt;
-                color: #F8F9FD;
-            }
+        buttons_layout.addWidget(self.save_button)
+        buttons_layout.addWidget(self.update_button)
+        buttons_layout.addStretch(1)
 
-            ChatBubble[role="error"] > QLabel#messageLabel {
-                color: #FFFFFF;
-            }
-            """
-        )
+        layout.addLayout(buttons_layout)
+
+        self.status_label = QtWidgets.QLabel("")
+        self.status_label.setWordWrap(True)
+        layout.addWidget(self.status_label)
+        layout.addStretch(1)
+
+    # ------------------------------------------------------------------
+    # Actions
+    # ------------------------------------------------------------------
+    def _save_webhook(self) -> None:
+        url = self.webhook_input.text().strip()
+        self._config["webhook_url"] = url
+        try:
+            save_config(self._config)
+            self.status_label.setText("Configuration sauvegardée.")
+            self.webhook_changed.emit(url)
+        except OSError as exc:
+            self.status_label.setText(f"Erreur lors de la sauvegarde : {exc}")
+
+    def _update_application(self) -> None:
+        self.status_label.setText("Mise à jour en cours…")
+        QtWidgets.QApplication.processEvents()
+        try:
+            output = subprocess.check_output(
+                ["git", "pull", "origin", "main"],
+                stderr=subprocess.STDOUT,
+                text=True,
+            )
+            print(output)
+        except subprocess.CalledProcessError as exc:
+            self.status_label.setText(f"Échec de la mise à jour : {exc.output}")
+            return
+
+        self.status_label.setText("Mise à jour réussie, redémarrage…")
+        QtCore.QTimer.singleShot(1500, self._restart_application)
+
+    def _restart_application(self) -> None:
+        os.execl(sys.executable, sys.executable, *sys.argv)
+
+
+class PlaceholderTab(QtWidgets.QWidget):
+    """Onglet placeholder pour les futures fonctionnalités."""
+
+    def __init__(self, parent: QtWidgets.QWidget | None = None) -> None:
+        super().__init__(parent)
+        layout = QtWidgets.QVBoxLayout(self)
+        layout.setContentsMargins(16, 16, 16, 16)
+        label = QtWidgets.QLabel("Fonctionnalité à venir…")
+        label.setAlignment(QtCore.Qt.AlignCenter)
+        layout.addStretch(1)
+        layout.addWidget(label)
+        layout.addStretch(1)
+
+
+class MainWindow(QtWidgets.QMainWindow):
+    """Fenêtre principale avec ses trois onglets."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.setWindowTitle("Interface n8n")
+        self.resize(900, 620)
+
+        self.config = load_config()
+
+        self.tab_widget = QtWidgets.QTabWidget()
+        self.setCentralWidget(self.tab_widget)
+
+        self.params_tab = ParamsTab(self.config)
+        self.params_tab.webhook_changed.connect(self._update_webhook)
+        self.chat_tab = ChatTab(self.config.get("webhook_url", ""))
+        self.placeholder_tab = PlaceholderTab()
+
+        self.tab_widget.addTab(self.params_tab, "Paramètres")
+        self.tab_widget.addTab(self.chat_tab, "Chat")
+        self.tab_widget.addTab(self.placeholder_tab, "À venir")
+
+    def _update_webhook(self, url: str) -> None:
+        self.chat_tab.set_webhook_url(url)
+
+
+def create_app() -> QtWidgets.QApplication:
+    app = QtWidgets.QApplication(sys.argv)
+    qss = """
+    QMainWindow {
+        background-color: #121212;
+        color: #FFFFFF;
+        font-family: 'Segoe UI', sans-serif;
+    }
+
+    QTabWidget::pane {
+        border: 1px solid #333;
+        background: #1E1E1E;
+        border-radius: 8px;
+    }
+
+    QTabBar::tab {
+        background: #2A2A2A;
+        color: #CCCCCC;
+        padding: 8px 16px;
+        border-top-left-radius: 6px;
+        border-top-right-radius: 6px;
+    }
+
+    QTabBar::tab:selected {
+        background: #3A3A3A;
+        color: #00CFFF;
+        font-weight: bold;
+    }
+
+    QLineEdit {
+        background: #1E1E1E;
+        color: #FFFFFF;
+        border: 1px solid #444;
+        border-radius: 6px;
+        padding: 6px;
+    }
+
+    QPushButton {
+        background-color: #2A2A2A;
+        color: #FFFFFF;
+        border: 1px solid #444;
+        border-radius: 8px;
+        padding: 6px 12px;
+    }
+
+    QPushButton:hover {
+        background-color: #3A3A3A;
+    }
+
+    QPushButton:pressed {
+        background-color: #00CFFF;
+        color: #000000;
+        font-weight: bold;
+    }
+
+    QScrollArea {
+        background: #121212;
+        border: none;
+    }
+
+    QLabel {
+        color: #FFFFFF;
+        font-size: 14px;
+    }
+
+    QTextEdit, QPlainTextEdit {
+        background: #1E1E1E;
+        color: #FFFFFF;
+        border: 1px solid #333;
+        border-radius: 6px;
+    }
+
+    #chatBubble {
+        background-color: #2A2A2A;
+        border-radius: 12px;
+    }
+
+    #chatBubble[role="user"] {
+        background-color: #3A3A3A;
+    }
+
+    #chatBubble[role="agent"] {
+        background-color: #1F3A5B;
+    }
+
+    #chatBubble[role="error"] {
+        background-color: #4A1F1F;
+    }
+
+    #chatBubble[role="error"] #bubbleText {
+        color: #FF6B6B;
+    }
+
+    #bubbleText {
+        color: #FFFFFF;
+    }
+    """
+    app.setStyleSheet(qss)
+    return app
 
 
 def main() -> None:
-    app = QtWidgets.QApplication([])
+    app = create_app()
     window = MainWindow()
-    window.resize(900, 720)
     window.show()
-    app.exec()
+    sys.exit(app.exec())
 
 
 if __name__ == "__main__":
