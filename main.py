@@ -6,7 +6,7 @@ import json
 from typing import Any
 
 import requests
-from PySide6 import QtCore, QtWidgets
+from PySide6 import QtCore, QtGui, QtWidgets
 
 
 DEFAULT_WEBHOOK_URL = "http://localhost:5678/webhook/seo-optimize"
@@ -42,24 +42,26 @@ class RequestWorker(QtCore.QObject):
 class ChatBubble(QtWidgets.QFrame):
     """Widget représentant une bulle de discussion."""
 
-    def __init__(self, sender: str, message: str, role: str, parent: QtWidgets.QWidget | None = None) -> None:
+    def __init__(
+        self, sender: str, message: str, role: str, parent: QtWidgets.QWidget | None = None
+    ) -> None:
         super().__init__(parent)
         self.setObjectName("chatBubble")
         self.setProperty("role", role)
-        self.setSizePolicy(QtWidgets.QSizePolicy.Preferred, QtWidgets.QSizePolicy.Minimum)
-        self.setMaximumWidth(560)
+        self.setSizePolicy(QtWidgets.QSizePolicy.Maximum, QtWidgets.QSizePolicy.Minimum)
+        self.setMaximumWidth(720)
 
         layout = QtWidgets.QVBoxLayout(self)
-        layout.setContentsMargins(18, 12, 18, 12)
-        layout.setSpacing(6)
+        layout.setContentsMargins(20, 14, 20, 14)
+        layout.setSpacing(8)
 
         sender_label = QtWidgets.QLabel(sender)
         sender_label.setObjectName("senderLabel")
-        sender_label.setAlignment(QtCore.Qt.AlignRight if role == "user" else QtCore.Qt.AlignLeft)
+        sender_label.setAlignment(QtCore.Qt.AlignLeft)
 
         message_label = QtWidgets.QLabel(message)
         message_label.setObjectName("messageLabel")
-        message_label.setAlignment(QtCore.Qt.AlignRight if role == "user" else QtCore.Qt.AlignLeft)
+        message_label.setAlignment(QtCore.Qt.AlignLeft)
         message_label.setWordWrap(True)
         message_label.setTextInteractionFlags(
             QtCore.Qt.TextSelectableByMouse | QtCore.Qt.TextSelectableByKeyboard
@@ -70,9 +72,37 @@ class ChatBubble(QtWidgets.QFrame):
         layout.addWidget(sender_label)
         layout.addWidget(message_label)
 
-        # Re-polish to appliquer les styles dépendant des propriétés
-        self.style().unpolish(self)
-        self.style().polish(self)
+        self._repolish()
+
+    def _repolish(self) -> None:
+        style = self.style()
+        style.unpolish(self)
+        style.polish(self)
+
+
+class ChatInput(QtWidgets.QPlainTextEdit):
+    """Zone de saisie qui envoie le message sur Entrée."""
+
+    submitted = QtCore.Signal()
+
+    def __init__(self, parent: QtWidgets.QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setPlaceholderText("Poser une question")
+        self.setMaximumHeight(140)
+        self.setMinimumHeight(64)
+        self.document().setDocumentMargin(8)
+
+    def sizeHint(self) -> QtCore.QSize:  # pragma: no cover - dépend de Qt
+        size = super().sizeHint()
+        size.setHeight(88)
+        return size
+
+    def keyPressEvent(self, event: QtGui.QKeyEvent) -> None:  # pragma: no cover - dépend de Qt
+        if event.key() in (QtCore.Qt.Key_Return, QtCore.Qt.Key_Enter) and not event.modifiers() & QtCore.Qt.ShiftModifier:
+            event.accept()
+            self.submitted.emit()
+        else:
+            super().keyPressEvent(event)
 
 
 class MainWindow(QtWidgets.QMainWindow):
@@ -80,7 +110,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def __init__(self) -> None:
         super().__init__()
-        self.setWindowTitle("Interface n8n Chat")
+        self.setWindowTitle("Assistant n8n")
 
         self.settings = QtCore.QSettings("ProjetA", "WebhookChat")
         self.webhook_url: str = self.settings.value("webhook_url", DEFAULT_WEBHOOK_URL, str)
@@ -94,79 +124,123 @@ class MainWindow(QtWidgets.QMainWindow):
     # Construction de l'interface
     # ------------------------------------------------------------------
     def _build_ui(self) -> None:
-        tab_widget = QtWidgets.QTabWidget()
-        tab_widget.setObjectName("mainTabs")
-        tab_widget.addTab(self._build_settings_tab(), "Paramètres")
-        tab_widget.addTab(self._build_chat_tab(), "Chat")
+        central_widget = QtWidgets.QWidget()
+        central_layout = QtWidgets.QVBoxLayout(central_widget)
+        central_layout.setContentsMargins(0, 0, 0, 0)
+        central_layout.setSpacing(0)
 
-        self.setCentralWidget(tab_widget)
+        central_layout.addWidget(self._build_header())
+        central_layout.addWidget(self._build_chat_area(), stretch=1)
+        central_layout.addWidget(self._build_input_panel())
+
+        self.setCentralWidget(central_widget)
         self._apply_styles()
 
-    def _build_settings_tab(self) -> QtWidgets.QWidget:
-        widget = QtWidgets.QWidget()
-        layout = QtWidgets.QVBoxLayout(widget)
+    def _build_header(self) -> QtWidgets.QWidget:
+        header = QtWidgets.QWidget()
+        header.setObjectName("chatHeader")
+        layout = QtWidgets.QHBoxLayout(header)
+        layout.setContentsMargins(24, 16, 24, 16)
+        layout.setSpacing(12)
 
-        form_layout = QtWidgets.QFormLayout()
-        self.webhook_input = QtWidgets.QLineEdit(self.webhook_url)
-        form_layout.addRow("URL du webhook :", self.webhook_input)
+        title = QtWidgets.QLabel("ChatGPT")
+        title.setObjectName("chatTitle")
 
-        save_button = QtWidgets.QPushButton("Sauvegarder")
-        save_button.clicked.connect(self.save_settings)
+        subtitle = QtWidgets.QLabel("Interagissez avec votre agent n8n")
+        subtitle.setObjectName("chatSubtitle")
 
-        layout.addLayout(form_layout)
-        layout.addWidget(save_button)
+        title_layout = QtWidgets.QVBoxLayout()
+        title_layout.setContentsMargins(0, 0, 0, 0)
+        title_layout.setSpacing(4)
+        title_layout.addWidget(title)
+        title_layout.addWidget(subtitle)
+
+        layout.addLayout(title_layout)
         layout.addStretch()
 
-        return widget
+        settings_button = QtWidgets.QToolButton()
+        settings_button.setObjectName("settingsButton")
+        settings_button.setText("Paramètres")
+        settings_button.clicked.connect(self.open_settings_dialog)
+        layout.addWidget(settings_button)
 
-    def _build_chat_tab(self) -> QtWidgets.QWidget:
-        widget = QtWidgets.QWidget()
-        layout = QtWidgets.QVBoxLayout(widget)
-        layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(0)
+        return header
 
+    def _build_chat_area(self) -> QtWidgets.QScrollArea:
         self.chat_scroll = QtWidgets.QScrollArea()
+        self.chat_scroll.setObjectName("chatScroll")
         self.chat_scroll.setWidgetResizable(True)
         self.chat_scroll.setFrameShape(QtWidgets.QFrame.NoFrame)
         self.chat_scroll.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarAlwaysOff)
 
         self.chat_container = QtWidgets.QWidget()
         self.chat_layout = QtWidgets.QVBoxLayout(self.chat_container)
-        self.chat_layout.setContentsMargins(18, 24, 18, 24)
-        self.chat_layout.setSpacing(16)
+        self.chat_layout.setContentsMargins(48, 32, 48, 32)
+        self.chat_layout.setSpacing(18)
         self.chat_layout.addStretch()
 
         self.chat_scroll.setWidget(self.chat_container)
+        return self.chat_scroll
 
+    def _build_input_panel(self) -> QtWidgets.QWidget:
         input_panel = QtWidgets.QWidget()
         input_panel.setObjectName("chatInputPanel")
-        input_layout = QtWidgets.QHBoxLayout(input_panel)
-        input_layout.setContentsMargins(18, 16, 18, 16)
-        input_layout.setSpacing(12)
+        layout = QtWidgets.QHBoxLayout(input_panel)
+        layout.setContentsMargins(48, 24, 48, 36)
+        layout.setSpacing(16)
 
-        self.chat_input = QtWidgets.QLineEdit()
-        self.chat_input.setPlaceholderText("Écrire un message...")
-        self.chat_input.returnPressed.connect(self.send_chat_message)
+        self.chat_input = ChatInput()
+        self.chat_input.submitted.connect(self.send_chat_message)
 
         self.send_button = QtWidgets.QPushButton("Envoyer")
+        self.send_button.setObjectName("sendButton")
         self.send_button.clicked.connect(self.send_chat_message)
 
-        input_layout.addWidget(self.chat_input, stretch=1)
-        input_layout.addWidget(self.send_button)
+        layout.addWidget(self.chat_input, stretch=1)
+        layout.addWidget(self.send_button)
 
-        layout.addWidget(self.chat_scroll, stretch=1)
-        layout.addWidget(input_panel)
-
-        return widget
+        return input_panel
 
     # ------------------------------------------------------------------
     # Gestion des paramètres
     # ------------------------------------------------------------------
     @QtCore.Slot()
-    def save_settings(self) -> None:
-        self.webhook_url = self.webhook_input.text().strip() or DEFAULT_WEBHOOK_URL
+    def open_settings_dialog(self) -> None:
+        dialog = QtWidgets.QDialog(self)
+        dialog.setWindowTitle("Paramètres")
+        dialog.setModal(True)
+
+        layout = QtWidgets.QVBoxLayout(dialog)
+        layout.setContentsMargins(24, 24, 24, 24)
+        layout.setSpacing(16)
+
+        description = QtWidgets.QLabel(
+            "Configurez l'URL du webhook utilisé pour communiquer avec l'agent n8n."
+        )
+        description.setWordWrap(True)
+
+        webhook_input = QtWidgets.QLineEdit(self.webhook_url)
+        webhook_input.setPlaceholderText("https://...")
+
+        button_box = QtWidgets.QDialogButtonBox(
+            QtWidgets.QDialogButtonBox.Save | QtWidgets.QDialogButtonBox.Cancel
+        )
+        button_box.accepted.connect(dialog.accept)
+        button_box.rejected.connect(dialog.reject)
+
+        layout.addWidget(description)
+        layout.addWidget(webhook_input)
+        layout.addWidget(button_box)
+
+        if dialog.exec() == QtWidgets.QDialog.Accepted:
+            self._save_webhook_url(webhook_input.text())
+
+    def _save_webhook_url(self, value: str) -> None:
+        self.webhook_url = value.strip() or DEFAULT_WEBHOOK_URL
         self.settings.setValue("webhook_url", self.webhook_url)
-        QtWidgets.QMessageBox.information(self, "Paramètres", "URL sauvegardée avec succès.")
+        QtWidgets.QMessageBox.information(
+            self, "Paramètres", "URL sauvegardée avec succès."
+        )
 
     # ------------------------------------------------------------------
     # Gestion du chat
@@ -178,12 +252,9 @@ class MainWindow(QtWidgets.QMainWindow):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(12)
 
-        if role == "user":
-            layout.addStretch()
-            layout.addWidget(bubble, 0, QtCore.Qt.AlignRight)
-        else:
-            layout.addWidget(bubble, 0, QtCore.Qt.AlignLeft)
-            layout.addStretch()
+        layout.addStretch()
+        layout.addWidget(bubble, 0, QtCore.Qt.AlignHCenter)
+        layout.addStretch()
 
         self.chat_layout.insertWidget(self.chat_layout.count() - 1, container)
         QtCore.QTimer.singleShot(0, self._scroll_to_bottom)
@@ -198,7 +269,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
     @QtCore.Slot()
     def send_chat_message(self) -> None:
-        message = self.chat_input.text().strip()
+        message = self.chat_input.toPlainText().strip()
         if not message:
             return
 
@@ -253,81 +324,98 @@ class MainWindow(QtWidgets.QMainWindow):
         self.setStyleSheet(
             """
             QMainWindow {
-                background-color: #1b1c21;
+                background-color: #202123;
             }
 
             QWidget {
-                color: #f2f4f8;
+                color: #ECEFF4;
                 font-family: 'Segoe UI', 'Helvetica Neue', Arial, sans-serif;
-                font-size: 12pt;
+                font-size: 11pt;
             }
 
-            QTabWidget#mainTabs::pane {
-                border: none;
+            #chatHeader {
+                background-color: #282B30;
+                border-bottom: 1px solid #2F3238;
             }
 
-            QTabBar::tab {
-                background-color: #2a2b31;
-                color: #c7c9d3;
-                padding: 10px 22px;
-                border-top-left-radius: 12px;
-                border-top-right-radius: 12px;
-                margin-right: 6px;
-            }
-
-            QTabBar::tab:selected {
-                background-color: #34353d;
-                color: #ffffff;
-            }
-
-            QLineEdit {
-                background-color: #2c2d35;
-                border: 1px solid #3a3b44;
-                border-radius: 22px;
-                padding: 12px 18px;
-                color: #f2f4f8;
-            }
-
-            QLineEdit:focus {
-                border: 1px solid #4f6bed;
-            }
-
-            QPushButton {
-                background-color: #4f6bed;
-                color: #ffffff;
-                border-radius: 20px;
-                padding: 12px 24px;
+            #chatTitle {
+                font-size: 18pt;
                 font-weight: 600;
+                color: #FFFFFF;
             }
 
-            QPushButton:hover {
-                background-color: #5d7dff;
+            #chatSubtitle {
+                font-size: 11pt;
+                color: rgba(236, 239, 244, 0.7);
             }
 
-            QPushButton:pressed {
-                background-color: #425bd4;
+            #settingsButton {
+                padding: 8px 18px;
+                border-radius: 18px;
+                background-color: rgba(255, 255, 255, 0.08);
+                color: #FFFFFF;
+            }
+
+            #settingsButton:hover {
+                background-color: rgba(255, 255, 255, 0.14);
+            }
+
+            #settingsButton:pressed {
+                background-color: rgba(255, 255, 255, 0.2);
+            }
+
+            #chatScroll {
+                background-color: #343541;
             }
 
             #chatInputPanel {
-                background-color: #18191f;
-                border-top: 1px solid #2a2b31;
+                background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                                            stop:0 #343541, stop:1 #202123);
+            }
+
+            ChatInput {
+                background-color: #40414F;
+                border-radius: 18px;
+                padding: 16px 18px;
+                color: #FFFFFF;
+                border: 1px solid rgba(255, 255, 255, 0.08);
+            }
+
+            ChatInput:focus {
+                border: 1px solid rgba(134, 160, 246, 0.9);
+            }
+
+            QPushButton#sendButton {
+                background-color: #10A37F;
+                color: #FFFFFF;
+                padding: 14px 28px;
+                border-radius: 22px;
+                font-weight: 600;
+            }
+
+            QPushButton#sendButton:hover {
+                background-color: #17C190;
+            }
+
+            QPushButton#sendButton:pressed {
+                background-color: #0D8568;
             }
 
             ChatBubble {
                 border-radius: 18px;
-                background-color: #2e3038;
+                background-color: #444654;
             }
 
             ChatBubble[role="user"] {
-                background-color: #3a3d47;
+                background-color: #343541;
             }
 
             ChatBubble[role="agent"] {
-                background-color: #1f6feb;
+                background-color: #444654;
             }
 
             ChatBubble[role="error"] {
-                background-color: #c62828;
+                background-color: #8B3A3A;
             }
 
             ChatBubble > QLabel#senderLabel {
@@ -345,12 +433,11 @@ class MainWindow(QtWidgets.QMainWindow):
 
             ChatBubble > QLabel#messageLabel {
                 font-size: 12pt;
-                color: #f5f7fb;
+                color: #F8F9FD;
             }
 
-            ChatBubble[role="agent"] > QLabel#messageLabel,
             ChatBubble[role="error"] > QLabel#messageLabel {
-                color: #ffffff;
+                color: #FFFFFF;
             }
             """
         )
@@ -359,7 +446,7 @@ class MainWindow(QtWidgets.QMainWindow):
 def main() -> None:
     app = QtWidgets.QApplication([])
     window = MainWindow()
-    window.resize(640, 480)
+    window.resize(900, 720)
     window.show()
     app.exec()
 
