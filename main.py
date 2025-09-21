@@ -107,6 +107,8 @@ class ChatTab(QtWidgets.QWidget):
         self.scroll_area.setFrameShape(QtWidgets.QFrame.NoFrame)
 
         self.scroll_widget = QtWidgets.QWidget()
+        self.scroll_widget.setAttribute(QtCore.Qt.WA_StyledBackground, True)
+        self.scroll_widget.setStyleSheet("background-color: #0D0D0D;")
         self.messages_layout = QtWidgets.QVBoxLayout(self.scroll_widget)
         self.messages_layout.setAlignment(QtCore.Qt.AlignTop)
         self.messages_layout.setSpacing(10)
@@ -340,99 +342,98 @@ class MainWindow(QtWidgets.QMainWindow):
 def create_app() -> QtWidgets.QApplication:
     app = QtWidgets.QApplication(sys.argv)
     qss = """
-    QMainWindow {
-        background-color: #121212;
-        color: #FFFFFF;
-        font-family: 'Segoe UI', sans-serif;
-    }
+QMainWindow {
+    background-color: #0D0D0D;
+    color: #E0E0E0;
+    font-family: 'Segoe UI', sans-serif;
+}
 
-    QTabWidget::pane {
-        border: 1px solid #333;
-        background: #1E1E1E;
-        border-radius: 8px;
-    }
+QWidget {
+    background-color: #0D0D0D;
+    color: #E0E0E0;
+    font-family: 'Segoe UI', sans-serif;
+}
 
-    QTabBar::tab {
-        background: #2A2A2A;
-        color: #CCCCCC;
-        padding: 8px 16px;
-        border-top-left-radius: 6px;
-        border-top-right-radius: 6px;
-    }
+QTabWidget::pane {
+    border: 1px solid #222;
+    background: #121212;
+    border-radius: 6px;
+}
 
-    QTabBar::tab:selected {
-        background: #3A3A3A;
-        color: #00CFFF;
-        font-weight: bold;
-    }
+QTabBar::tab {
+    background: #2A2A2A;
+    color: #CCCCCC;
+    padding: 8px 16px;
+    border-top-left-radius: 6px;
+    border-top-right-radius: 6px;
+}
 
-    QLineEdit {
-        background: #1E1E1E;
-        color: #FFFFFF;
-        border: 1px solid #444;
-        border-radius: 6px;
-        padding: 6px;
-    }
+QTabBar::tab:selected {
+    background: #3A3A3A;
+    color: #00CFFF;
+    font-weight: bold;
+}
 
-    QPushButton {
-        background-color: #2A2A2A;
-        color: #FFFFFF;
-        border: 1px solid #444;
-        border-radius: 8px;
-        padding: 6px 12px;
-    }
+QLineEdit, QTextEdit, QPlainTextEdit {
+    background: #1E1E1E;
+    color: #FFFFFF;
+    border: 1px solid #444;
+    border-radius: 6px;
+    padding: 6px;
+}
 
-    QPushButton:hover {
-        background-color: #3A3A3A;
-    }
+QPushButton {
+    background-color: #2A2A2A;
+    color: #FFFFFF;
+    border: 1px solid #444;
+    border-radius: 6px;
+    padding: 6px 12px;
+}
 
-    QPushButton:pressed {
-        background-color: #00CFFF;
-        color: #000000;
-        font-weight: bold;
-    }
+QPushButton:hover {
+    background-color: #3A3A3A;
+}
 
-    QScrollArea {
-        background: #121212;
-        border: none;
-    }
+QPushButton:pressed {
+    background-color: #00CFFF;
+    color: #000000;
+    font-weight: bold;
+}
 
-    QLabel {
-        color: #FFFFFF;
-        font-size: 14px;
-    }
+QScrollArea {
+    background: #0D0D0D;
+    border: none;
+}
 
-    QTextEdit, QPlainTextEdit {
-        background: #1E1E1E;
-        color: #FFFFFF;
-        border: 1px solid #333;
-        border-radius: 6px;
-    }
+QLabel {
+    color: #FFFFFF;
+    font-size: 14px;
+}
 
-    #chatBubble {
-        background-color: #2A2A2A;
-        border-radius: 12px;
-    }
+#chatBubble {
+    border-radius: 12px;
+    padding: 8px;
+}
 
-    #chatBubble[role="user"] {
-        background-color: #3A3A3A;
-    }
+#chatBubble[role="user"] {
+    background-color: #2F2F2F;
+}
 
-    #chatBubble[role="agent"] {
-        background-color: #1F3A5B;
-    }
+#chatBubble[role="agent"] {
+    background-color: #1F3A5B;
+}
 
-    #chatBubble[role="error"] {
-        background-color: #4A1F1F;
-    }
+#chatBubble[role="error"] {
+    background-color: #4A1F1F;
+}
 
-    #chatBubble[role="error"] #bubbleText {
-        color: #FF6B6B;
-    }
+#chatBubble[role="error"] #bubbleText {
+    color: #FF6B6B;
+}
 
-    #bubbleText {
-        color: #FFFFFF;
-    }
+#bubbleText {
+    color: #FFFFFF;
+}
     """
     app.setStyleSheet(qss)
     return app
