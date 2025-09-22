@@ -484,19 +484,32 @@ class MainWindow(QtWidgets.QMainWindow):
         self.resize(900, 620)
 
         self.config = load_config()
+        webhook_value = self.config.get("webhook_url", "")
+        webhook = webhook_value if isinstance(webhook_value, str) else ""
+        webhook = webhook.strip()
 
         self.tab_widget = QtWidgets.QTabWidget()
         self.setCentralWidget(self.tab_widget)
 
         self.params_tab = ParamsTab(self.config)
         self.params_tab.webhook_changed.connect(self._update_webhook)
-        webhook = self.config.get("webhook_url", "")
         self.chat_tab = ChatTab(webhook)
         self.upload_tab = UploadTab(webhook)
 
         self.tab_widget.addTab(self.params_tab, "Paramètres")
         self.tab_widget.addTab(self.chat_tab, "Chat")
         self.tab_widget.addTab(self.upload_tab, "Upload")
+
+        if not webhook:
+            warning_message = (
+                "Aucun webhook configuré. Lancez le script n8n-ngrok.ps1 pour générer l’URL automatiquement."
+            )
+            QtWidgets.QMessageBox.warning(
+                self,
+                "Webhook manquant",
+                warning_message,
+            )
+            self.chat_tab._add_bubble(warning_message, "error")
 
     def _update_webhook(self, url: str) -> None:
         self.chat_tab.set_webhook_url(url)
