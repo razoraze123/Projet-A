@@ -9,6 +9,7 @@ import sys
 from pathlib import Path
 from typing import Any, Dict, Optional
 
+import requests
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QFont
 from PySide6.QtWidgets import (
@@ -220,7 +221,7 @@ class WebhookClient(QWidget):
         return container
 
     # ------------------------------------------------------------------
-    # Event handlers and business logic placeholders
+    # Event handlers and business logic
     # ------------------------------------------------------------------
 
     def _handle_save_settings(self) -> None:
@@ -241,17 +242,28 @@ class WebhookClient(QWidget):
         self.status_label.setStyleSheet("color: #388e3c;")
 
     def _handle_send_chat(self) -> None:
-        """Read the current message and simulate sending it to the webhook."""
+        """Read the current message and send it to the configured webhook."""
         message = self.chat_input.text().strip()
         if not message:
+            return
+
+        webhook_url = self._resolve_webhook_url()
+        if not webhook_url:
+            QMessageBox.warning(
+                self,
+                "Webhook manquant",
+                "Veuillez configurer l'URL du webhook dans l'onglet Paramètres.",
+            )
             return
 
         self.chat_display.append(f"Vous : {message}")
         self.chat_input.clear()
 
-        response = self.send_message_to_webhook(message)
-        if response:
+        response = self.send_message_to_webhook(webhook_url, message)
+        if response is not None:
             self.chat_display.append(f"Webhook : {response}")
+        else:
+            self.chat_display.append("⚠️ Échec de l'envoi du message.")
 
     def _handle_choose_file(self) -> None:
         """Open a file dialog so the user can select a file to upload."""
@@ -269,46 +281,101 @@ class WebhookClient(QWidget):
             self.upload_button.setEnabled(False)
 
     def _handle_upload_file(self) -> None:
-        """Simulate the upload of a previously selected file."""
+        """Send the selected file to the webhook using a multipart request."""
         if not self.selected_file_path:
             QMessageBox.warning(self, "Upload", "Veuillez sélectionner un fichier.")
             return
 
-        self.upload_file_to_webhook(self.selected_file_path)
-        QMessageBox.information(
-            self, "Upload", f"Fichier '{self.selected_file_path.name}' envoyé !"
-        )
-        self.file_name_label.setText("Aucun fichier sélectionné")
-        self.upload_button.setEnabled(False)
-        self.selected_file_path = None
+        webhook_url = self._resolve_webhook_url()
+        if not webhook_url:
+            QMessageBox.warning(
+                self,
+                "Webhook manquant",
+                "Veuillez configurer l'URL du webhook dans l'onglet Paramètres.",
+            )
+            return
+
+        if self.upload_file_to_webhook(webhook_url, self.selected_file_path):
+            QMessageBox.information(
+                self,
+                "Upload",
+                f"Fichier '{self.selected_file_path.name}' envoyé avec succès !",
+            )
+            self.file_name_label.setText("Aucun fichier sélectionné")
+            self.upload_button.setEnabled(False)
+            self.selected_file_path = None
 
     # ------------------------------------------------------------------
-    # Placeholder methods for future HTTP integration
+    # Webhook communication helpers
     # ------------------------------------------------------------------
 
-    def send_message_to_webhook(self, message: str) -> str:
-        """Placeholder for sending a text message to the webhook.
+    def _resolve_webhook_url(self) -> str:
+        """Return the currently configured webhook URL from the UI."""
 
-        Parameters
-        ----------
-        message:
-            The textual content to deliver.
+        url = self.webhook_input.text().strip() or self.webhook_url.strip()
+        self.webhook_url = url
+        return url
 
-        Returns
-        -------
-        str
-            A simulated response string.
-        """
+    def send_message_to_webhook(self, webhook_url: str, message: str) -> Optional[str]:
+        """Send a text message to the webhook and return the response text."""
 
-        print(f"[DEBUG] Sending message to {self.webhook_url!r}: {message}")
-        return "Message envoyé (simulation)."
+        try:
+            response = requests.post(
+                webhook_url,
+                json={"message": message},
+                timeout=15,
+            )
+            response.raise_for_status()
+        except requests.exceptions.RequestException as exc:
+            QMessageBox.critical(
+                self,
+                "Erreur réseau",
+                (
+                    "Impossible d'envoyer le message au webhook.\n"
+                    f"Détails : {exc}"
+                ),
+            )
+            return None
 
-    def upload_file_to_webhook(self, file_path: Path) -> None:
-        """Placeholder for uploading a file to the webhook."""
+        try:
+            data = response.json()
+        except ValueError:
+            content = response.text.strip()
+            return content or f"Statut HTTP {response.status_code}"
 
-        print(
-            f"[DEBUG] Uploading file to {self.webhook_url!r}: {file_path}"
-        )
+        return json.dumps(data, ensure_ascii=False, indent=2)
+
+    def upload_file_to_webhook(self, webhook_url: str, file_path: Path) -> bool:
+        """Upload a file to the webhook using a multipart/form-data request."""
+
+        try:
+            with file_path.open("rb") as handle:
+                files = {"file": (file_path.name, handle)}
+                response = requests.post(
+                    webhook_url,
+                    files=files,
+                    timeout=30,
+                )
+            response.raise_for_status()
+        except FileNotFoundError:
+            QMessageBox.critical(
+                self,
+                "Fichier introuvable",
+                "Le fichier sélectionné est introuvable sur le disque.",
+            )
+            return False
+        except requests.exceptions.RequestException as exc:
+            QMessageBox.critical(
+                self,
+                "Erreur réseau",
+                (
+                    "Impossible d'envoyer le fichier au webhook.\n"
+                    f"Détails : {exc}"
+                ),
+            )
+            return False
+
+        return True
 
 
 # ---------------------------------------------------------------------------
