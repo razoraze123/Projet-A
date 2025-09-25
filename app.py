@@ -295,12 +295,18 @@ class WebhookClient(QWidget):
             )
             return
 
-        if self.upload_file_to_webhook(webhook_url, self.selected_file_path):
+        response = self.upload_file_to_webhook(webhook_url, self.selected_file_path)
+        if response is not None:
             QMessageBox.information(
                 self,
                 "Upload",
                 f"Fichier '{self.selected_file_path.name}' envoyé avec succès !",
             )
+            if getattr(self, "chat_display", None) is not None:
+                self.chat_display.append(
+                    f"Upload : fichier '{self.selected_file_path.name}' envoyé."
+                )
+                self.chat_display.append(f"Webhook : {response}")
             self.file_name_label.setText("Aucun fichier sélectionné")
             self.upload_button.setEnabled(False)
             self.selected_file_path = None
@@ -345,12 +351,14 @@ class WebhookClient(QWidget):
 
         return json.dumps(data, ensure_ascii=False, indent=2)
 
-    def upload_file_to_webhook(self, webhook_url: str, file_path: Path) -> bool:
+    def upload_file_to_webhook(self, webhook_url: str, file_path: Path) -> Optional[str]:
         """Upload a file to the webhook using a multipart/form-data request."""
 
         try:
             with file_path.open("rb") as handle:
-                files = {"file": (file_path.name, handle)}
+                files = {
+                    "file": (file_path.name, handle, "application/octet-stream"),
+                }
                 response = requests.post(
                     webhook_url,
                     files=files,
@@ -363,7 +371,7 @@ class WebhookClient(QWidget):
                 "Fichier introuvable",
                 "Le fichier sélectionné est introuvable sur le disque.",
             )
-            return False
+            return None
         except requests.exceptions.RequestException as exc:
             QMessageBox.critical(
                 self,
@@ -373,9 +381,15 @@ class WebhookClient(QWidget):
                     f"Détails : {exc}"
                 ),
             )
-            return False
+            return None
 
-        return True
+        try:
+            data = response.json()
+        except ValueError:
+            content = response.text.strip()
+            return content or f"Statut HTTP {response.status_code}"
+
+        return json.dumps(data, ensure_ascii=False, indent=2)
 
 
 # ---------------------------------------------------------------------------
